@@ -10,7 +10,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@100printswithme/browser-sdk": "file:../sdk",
+    "@100printswithme/browser-sdk": "^1.0.0",
     "agentation": "^3.0.2",
     "react": "^19.2.7",
     "react-dom": "^19.2.7"
