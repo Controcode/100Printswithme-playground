@@ -177,7 +177,7 @@ Official Browser SDK source code.
 
 ### Documentation
 
-https://docs.100printswith.me
+https://100printswith.me/docs
 
 Complete SDK documentation.
 
