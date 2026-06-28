@@ -4,7 +4,7 @@ import { Agentation } from "agentation";
 export default function App() {
   const [key, setKey] = useState(localStorage.getItem("sdk_test_key") || "");
   const [templateId, setTemplateId] = useState(localStorage.getItem("sdk_test_template_id") || "");
-  const [baseUrl, setBaseUrl] = useState("http://localhost:8000");
+  const [baseUrl, setBaseUrl] = useState("https://api.100printswith.me");
 
   const [logs, setLogs] = useState<string[]>([]);
   const [status, setStatus] = useState("Idle");
@@ -357,7 +357,7 @@ export default function App() {
 
   return (
     <>
-      <Agentation />
+      {/* <Agentation /> */}
       {/* HEADER SECTION */}
       <header style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "8px" }}>
         <div>
@@ -584,9 +584,9 @@ export default function App() {
             <div style={{ display: "flex", alignItems: "center", gap: "16px" }}>
               <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
                 <span className="form-label" style={{ fontSize: "0.6875rem", color: "var(--text-secondary)", marginBottom: 0, textTransform: "none" }}>Format:</span>
-                <select 
-                  value={renderFormat} 
-                  onChange={e => setRenderFormat(e.target.value as any)} 
+                <select
+                  value={renderFormat}
+                  onChange={e => setRenderFormat(e.target.value as any)}
                   className="form-select"
                   style={{ padding: "4px 8px", width: "auto", fontSize: "0.75rem", height: "28px", background: "#030712" }}
                 >
