@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { BrowserSDK } from "@100printswithme/browser-sdk";
-import { Agentation } from "agentation";
+// import { Agentation } from "agentation";
 export default function App() {
   const [key, setKey] = useState(localStorage.getItem("sdk_test_key") || "");
   const [templateId, setTemplateId] = useState(localStorage.getItem("sdk_test_template_id") || "");
