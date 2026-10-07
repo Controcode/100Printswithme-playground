@@ -1,716 +1,2173 @@
-import { useState, useEffect, useRef } from "react";
-import { BrowserSDK } from "@100printswithme/browser-sdk";
-// import { Agentation } from "agentation";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { HundredPrints } from "@100printswithme/browser-sdk";
+
+type PlaygroundInput = {
+  templateId?: string;
+  template_id?: string;
+  data?: Record<string, unknown>;
+};
+
+const DEFAULT_CODE = `{
+  "template_id": "replace_your_template_id",
+  "data": {
+    "name": "Alex Johnson",
+    "achievement": "Outstanding Performance",
+    "date": "March 8, 2026",
+    "score": "98",
+    "image_url": "https://example.com/avatar.jpg"
+  }
+}`;
+
+const INSTALL_SNIPPETS = {
+  npm: "npm install @100printswithme/browser-sdk",
+  yarn: "yarn add @100printswithme/browser-sdk",
+};
+
 export default function App() {
-  const [key, setKey] = useState(localStorage.getItem("sdk_test_key") || "");
-  const [templateId, setTemplateId] = useState(localStorage.getItem("sdk_test_template_id") || "");
-  const [baseUrl, setBaseUrl] = useState("https://api.100printswith.me");
+  const [publishableKey, setPublishableKey] = useState(
+    () => localStorage.getItem("100prints_playground_key") || ""
+  );
+  const [code, setCode] = useState(DEFAULT_CODE);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [status, setStatus] = useState("Ready");
+  const [busy, setBusy] = useState<"preview" | "png" | "pdf" | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [installTab, setInstallTab] = useState<keyof typeof INSTALL_SNIPPETS>("npm");
+  const [copied, setCopied] = useState(false);
 
-  const [logs, setLogs] = useState<string[]>([]);
-  const [status, setStatus] = useState("Idle");
-  const [isInitialising, setIsInitialising] = useState(false);
-  const [templateInfo, setTemplateInfo] = useState<any>(null);
-  const [variables, setVariables] = useState<Record<string, string>>({});
-
-  // Single render states
-  const [renderFormat, setRenderFormat] = useState<"png" | "pdf">("png");
-  const [renderQuality, setRenderQuality] = useState<"draft" | "standard" | "high" | "ultra">("standard");
-  const [renderSide, setRenderSide] = useState<"front" | "back" | "both">("both");
-  const [previewBlobUrl, setPreviewBlobUrl] = useState<string | null>(null);
-
-
-  // New Table Bulk Export State
-  const [tableRows, setTableRows] = useState<Record<string, string>[]>([]);
-
-  const previewContainerRef = useRef<HTMLDivElement>(null);
-  const sdkRef = useRef<BrowserSDK | null>(null);
+  const lastPreviewResult = useRef<Awaited<ReturnType<HundredPrints["png"]>> | null>(null);
 
   useEffect(() => {
-    localStorage.setItem("sdk_test_key", key);
-  }, [key]);
+    localStorage.setItem("100prints_playground_key", publishableKey);
+  }, [publishableKey]);
 
   useEffect(() => {
-    localStorage.setItem("sdk_test_template_id", templateId);
-  }, [templateId]);
-
-  const log = (msg: string) => {
-    const time = new Date().toLocaleTimeString();
-    console.log(`[${time}] ${msg}`);
-    setLogs((prev) => [...prev, `[${time}] ${msg}`]);
-  };
-
-  const clearLogs = () => setLogs([]);
-
-  // Extracts mustache variables {{name}} from layers to build dynamic inputs
-  const extractVariables = (layers: any[]): string[] => {
-    const vars = new Set<string>();
-
-    const scanString = (str: any) => {
-      if (typeof str !== "string") return;
-      let match;
-      const localRegex = /\{\{([^}]+)\}\}/g;
-      while ((match = localRegex.exec(str)) !== null) {
-        vars.add(match[1].trim());
-      }
+    return () => {
+      lastPreviewResult.current?.revoke?.();
     };
+  }, []);
 
-    const scanLogic = (logic: any) => {
-      if (!logic || !logic.rules) return;
-      for (const rule of logic.rules) {
-        if (rule.left && rule.left.type === 'variable') {
-          vars.add(rule.left.value.trim());
-        }
-        if (rule.left && rule.left.type === 'template') {
-          scanString(rule.left.value);
-        }
-        if (rule.right && rule.right.type === 'variable') {
-          vars.add(rule.right.value.trim());
-        }
-        if (rule.right && rule.right.type === 'template') {
-          scanString(rule.right.value);
-        }
-      }
-      if (logic.overrides) {
-        for (const over of logic.overrides) {
-          if (over.value && typeof over.value === 'string') {
-            scanString(over.value);
-          }
-        }
-      }
-    };
-
-    const scan = (list: any[]) => {
-      for (const layer of list) {
-        if (layer.content) {
-          scanString(layer.content);
-        }
-        if (layer.logic) {
-          scanLogic(layer.logic);
-        }
-
-        if (layer.tableData && Array.isArray(layer.tableData.cells)) {
-          for (const row of layer.tableData.cells) {
-            if (Array.isArray(row)) {
-              for (const cell of row) {
-                if (cell && cell.content) {
-                  scanString(cell.content);
-                }
-              }
-            }
-          }
-        }
-
-        if (layer.chartData) {
-          if (layer.chartData.percentage) {
-            scanString(layer.chartData.percentage);
-          }
-          if (Array.isArray(layer.chartData.categories)) {
-            for (const cat of layer.chartData.categories) {
-              scanString(cat);
-            }
-          }
-          if (Array.isArray(layer.chartData.series)) {
-            for (const ser of layer.chartData.series) {
-              if (ser.label) {
-                scanString(ser.label);
-              }
-              if (Array.isArray(ser.values)) {
-                for (const val of ser.values) {
-                  scanString(val);
-                }
-              }
-            }
-          }
-        }
-
-        if (layer.layers) {
-          scan(layer.layers);
-        }
-      }
-    };
-
-    scan(layers);
-    return Array.from(vars);
-  };
-
-  async function loadTemplate() {
-    if (!key) {
-      log("❌ Error: API Key is required");
-      return;
-    }
-    if (!templateId) {
-      log("❌ Error: Template ID is required");
-      return;
-    }
-
-    setIsInitialising(true);
+  const parsedInput = useMemo(() => {
     try {
-      setStatus("Loading template...");
-      log(`🔄 Initializing BrowserSDK with baseUrl: ${baseUrl}`);
+      const parsed = JSON.parse(code) as PlaygroundInput;
 
-      const sdk = new BrowserSDK({
-        key,
-        baseUrl,
-      });
-      sdkRef.current = sdk;
-
-      log(`🔄 Fetching template definition for: ${templateId}`);
-      const response = await (sdk as any).fetchTemplateData(templateId);
-      log("✅ Template metadata loaded successfully");
-
-      const frontLayers = response.frontLayers || [];
-      const backLayers = response.backLayers || [];
-      const foundVars = extractVariables([...frontLayers, ...backLayers]);
-
-      log(`🔍 Extracted variables: ${foundVars.join(", ") || "None"}`);
-
-      const initialVars: Record<string, string> = {};
-      foundVars.forEach(v => {
-        initialVars[v] = response.sample_data?.[v] || `[${v}]`;
-      });
-
-      setVariables(initialVars);
-      setTemplateInfo(response);
-
-      // Initialize bulk export table with sample data or empty row if no variables
-      if (foundVars.length > 0) {
-        setTableRows([initialVars, { ...initialVars, [foundVars[0]]: `${initialVars[foundVars[0]]} (Copy)` }]);
-      } else {
-        setTableRows([{}]);
-      }
-
-      setStatus("Connected");
-      log(`🎉 Ready to render! Template: ${response.template_data?.name || "Untitled"}`);
-
-      // Render the actual initial preview using sample data!
-      await updatePreview(initialVars);
-    } catch (err) {
-      console.error(err);
-      log("❌ Failed to load template: " + (err as Error).message);
-      setStatus("Failed");
-    } finally {
-      setIsInitialising(false);
+      return {
+        templateId: parsed.templateId || parsed.template_id || "",
+        data: parsed.data || {},
+        error: null as string | null,
+      };
+    } catch {
+      return {
+        templateId: "",
+        data: {},
+        error: "The template config must be valid JSON.",
+      };
     }
-  }
+  }, [code]);
 
-  async function updatePreview(overrideVars?: Record<string, string>) {
-    if (!sdkRef.current || !templateId) {
-      log("❌ Error: SDK not initialized or Template ID missing. Load the template first.");
-      return;
+  function getClient() {
+    if (!publishableKey.trim()) {
+      throw new Error("Add your publishable API key first.");
     }
 
-    try {
-      log("🔄 Generating interactive canvas preview...");
-      const startTime = performance.now();
-
-      const varsToUse = overrideVars || variables;
-      const canvas = await sdkRef.current.preview({
-        templateId,
-        payload: varsToUse,
-        container: previewContainerRef.current!
-      });
-
-      const endTime = performance.now();
-      log(`✅ Canvas Preview completed in ${Math.round(endTime - startTime)}ms`);
-
-      if (previewContainerRef.current) {
-        previewContainerRef.current.innerHTML = "";
-        canvas.style.maxWidth = "100%";
-        canvas.style.height = "auto";
-        canvas.style.borderRadius = "8px";
-        canvas.style.boxShadow = "0 20px 25px -5px rgb(0 0 0 / 0.5)";
-        previewContainerRef.current.appendChild(canvas);
-      }
-    } catch (err) {
-      log("❌ Preview Error: " + (err as Error).message);
-    }
-  }
-
-  async function downloadSingle() {
-    if (!sdkRef.current || !templateId) {
-      log("❌ Error: Load template first");
-      return;
-    }
-
-    try {
-      log(`🔄 Rendering single record as format: ${renderFormat}, quality: ${renderQuality}, side: ${renderSide}`);
-      const startTime = performance.now();
-
-      const result = await sdkRef.current.render({
-        templateId,
-        payload: variables,
-        format: renderFormat,
-        quality: renderQuality,
-        side: renderSide
-      });
-
-      const endTime = performance.now();
-      log(`✅ Render completed in ${Math.round(endTime - startTime)}ms`);
-
-      const blob = result.blob;
-      if (!blob) {
-        log("❌ Render Error: No blob returned");
-        return;
-      }
-
-      const url = URL.createObjectURL(blob);
-      setPreviewBlobUrl(url);
-
-      const filename = `rendered-card.${renderFormat}`;
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = filename;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-
-      log(`🎉 Download started: ${filename}`);
-    } catch (err) {
-      log("❌ Render Error: " + (err as Error).message);
-    }
-  }
-
-
-  // Interactive Table Bulk Export Functions
-  const addTableRow = () => {
-    const newRow: Record<string, string> = {};
-    Object.keys(variables).forEach(k => {
-      newRow[k] = "";
+    return new HundredPrints({
+      publishableKey: publishableKey.trim(),
     });
-    setTableRows(prev => [...prev, newRow]);
-    log("➕ Added new record row to the table");
-  };
+  }
 
-  const deleteTableRow = (index: number) => {
-    if (tableRows.length <= 1) {
-      log("⚠️ Info: Keeping at least one row in the table");
-      return;
+  function getRenderInput() {
+    if (parsedInput.error) {
+      throw new Error(parsedInput.error);
     }
-    setTableRows(prev => prev.filter((_, i) => i !== index));
-    log(`➖ Removed row ${index + 1} from table`);
-  };
 
-  const handleTableCellChange = (rowIndex: number, key: string, value: string) => {
-    setTableRows(prev => prev.map((row, idx) => {
-      if (idx === rowIndex) {
-        return { ...row, [key]: value };
-      }
-      return row;
-    }));
-  };
+    if (!parsedInput.templateId.trim()) {
+      throw new Error("Replace template_id with your template ID.");
+    }
 
-  async function triggerTableBulkExport() {
-    if (!sdkRef.current || !templateId) {
-      log("❌ Error: Load template first");
-      return;
-    }
-    if (tableRows.length === 0) {
-      log("❌ Error: No records in the table to export");
-      return;
-    }
+    return {
+      templateId: parsedInput.templateId.trim(),
+      data: parsedInput.data,
+    };
+  }
+
+  function handleError(cause: unknown) {
+    console.error("100PrintsWithMe Playground:", cause);
+
+    const message =
+      cause instanceof Error
+        ? cause.message
+        : "Something went wrong while rendering.";
+
+    setError(message);
+    setStatus("Render failed");
+  }
+
+  async function renderPreview() {
+    setBusy("preview");
+    setError(null);
+    setStatus("Rendering preview…");
 
     try {
-      log(`🔄 Starting bulk render from Interactive Table for ${tableRows.length} records...`);
-      setStatus(`Bulk rendering (${tableRows.length} items)...`);
+      const prints = getClient();
+      const input = getRenderInput();
 
-      const startTime = performance.now();
-      const result = await sdkRef.current.renderBulk({
-        templateId,
-        rows: tableRows,
-        mode: renderFormat === "pdf" ? "merged" : "zip",
-        quality: renderQuality,
-        onProgress: (current: number, total: number, recordName: string) => {
-          log(`📈 Progress: ${current}/${total} - ${recordName} (${Math.round((current / total) * 100)}%)`);
-        }
+      const result = await prints.png({
+        ...input,
+        side: "front",
+        quality: "high",
       });
 
-      const endTime = performance.now();
-      log(`✅ Table bulk rendering finished in ${Math.round((endTime - startTime) / 1000)}s`);
+      lastPreviewResult.current?.revoke?.();
+      lastPreviewResult.current = result;
 
-      const blob = result.blob;
-      if (!blob) {
-        log("❌ Bulk Render Error: No blob returned");
-        setStatus("Connected");
-        return;
-      }
-
-      const url = URL.createObjectURL(blob);
-      const filename = renderFormat === "pdf" ? "table-bulk-export.pdf" : "table-bulk-export.zip";
-
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = filename;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-
-      log(`🎉 Table bulk download started: ${filename}`);
-      setStatus("Connected");
-    } catch (err) {
-      log("❌ Table Bulk Render Error: " + (err as Error).message);
-      setStatus("Failed");
+      setPreviewUrl(result.url);
+      setStatus("Preview ready");
+    } catch (cause) {
+      handleError(cause);
+    } finally {
+      setBusy(null);
     }
   }
 
-  // State code for helper text selection
-  const statusColorClass = status === "Connected" ? "connected" : status === "Failed" ? "failed" : status.includes("Loading") || status.includes("rendering") ? "loading" : "idle";
+  async function downloadPng() {
+    setBusy("png");
+    setError(null);
+    setStatus("Preparing PNG…");
+
+    try {
+      const prints = getClient();
+      const input = getRenderInput();
+
+      const result = await prints.png({
+        ...input,
+        side: "front",
+        quality: "high",
+      });
+
+      result.download("100prints-render.png");
+      window.setTimeout(() => result.revoke(), 1200);
+      setStatus("PNG downloaded");
+    } catch (cause) {
+      handleError(cause);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function downloadPdf() {
+    setBusy("pdf");
+    setError(null);
+    setStatus("Preparing PDF…");
+
+    try {
+      const prints = getClient();
+      const input = getRenderInput();
+
+      const result = await prints.pdf({
+        ...input,
+        includeBack: true,
+        quality: "high",
+      });
+
+      result.download("100prints-render.pdf");
+      window.setTimeout(() => result.revoke(), 1200);
+      setStatus("PDF downloaded");
+    } catch (cause) {
+      handleError(cause);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function copyInstall() {
+    await navigator.clipboard.writeText(INSTALL_SNIPPETS[installTab]);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1200);
+  }
 
   return (
     <>
-      {/* <Agentation /> */}
-      {/* HEADER SECTION */}
-      <header style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "8px" }}>
-        <div>
-          <h1>100PrintsWithMe Browser SDK Testbed</h1>
-          <p className="subtitle">Framework-Agnostic Engine Playpen & Testing Environment</p>
-        </div>
-        <div className="status-pill">
-          <span className={`status-dot ${statusColorClass}`} />
-          Status: <span style={{ color: "white" }}>{status}</span>
-        </div>
-      </header>
+      <style>{styles}</style>
 
-      {/* INITIALIZATION PANEL */}
-      <section className="panel">
-        <div className="panel-header">
-          <h2>
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: "var(--accent-purple)" }}>
-              <rect x="2" y="2" width="20" height="8" rx="2" ry="2"></rect>
-              <rect x="2" y="14" width="20" height="8" rx="2" ry="2"></rect>
-              <line x1="6" y1="6" x2="6.01" y2="6"></line>
-              <line x1="6" y1="18" x2="6.01" y2="18"></line>
-            </svg>
-            1. SDK Initialisation
-          </h2>
-        </div>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1.2fr 1fr auto", gap: "16px", alignItems: "end" }}>
-          <div className="form-group">
-            <label className="form-label">API Base URL</label>
-            <input
-              type="text"
-              className="form-input"
-              value={baseUrl}
-              onChange={e => setBaseUrl(e.target.value)}
-            />
-          </div>
-          <div className="form-group">
-            <label className="form-label">Publishable SDK Key</label>
-            <input
-              type="password"
-              placeholder="pk_live_..."
-              className="form-input"
-              value={key}
-              onChange={e => setKey(e.target.value)}
-            />
-          </div>
-          <div className="form-group">
-            <label className="form-label">Template ID</label>
-            <input
-              type="text"
-              placeholder="Template ID"
-              className="form-input"
-              value={templateId}
-              onChange={e => setTemplateId(e.target.value)}
-            />
-          </div>
-          <button onClick={loadTemplate} className="btn btn-primary" style={{ height: "42px" }} disabled={isInitialising}>
-            {isInitialising ? (
-              <>
-                <svg className="animate-spin" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                  <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" opacity="0.25"></circle>
-                  <path fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                </svg>
-                Fetching...
-              </>
-            ) : (
-              <>
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67" />
-                </svg>
-                Initialise & Fetch
-              </>
-            )}
-          </button>
-        </div>
-      </section>
+      <div className="page-shell">
+        <header className="site-header">
+          <div className="header-inner">
+            <a
+              href="https://100printswith.me"
+              target="_blank"
+              rel="noreferrer"
+              className="brand"
+              aria-label="100PrintsWithMe"
+            >
+              <img
+                src="https://www.100printswith.me/logo-100printswithme.png"
+                alt="100PrintsWithMe"
+              />
+            </a>
 
-      {/* SINGLE RENDER / PREVIEW SPLIT */}
-      <section className="grid-2">
-        {/* Controls */}
-        {templateInfo ? (
-          <div className="panel">
-            <div className="panel-header">
-              <h2>
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: "var(--accent-pink)" }}>
-                  <path d="M12 20h9"></path>
-                  <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path>
-                </svg>
-                2. Template Customization
-              </h2>
+            <nav className="nav-links" aria-label="Main navigation">
+              <a href="/docs">Docs</a>
+              <a
+                href="https://100printswith.me"
+                target="_blank"
+                rel="noreferrer"
+              >
+                Get API
+              </a>
+              <a
+                href="https://100printswith.me/feedback"
+                target="_blank"
+                rel="noreferrer"
+              >
+                Feedback
+              </a>
+              <a
+                className="nav-cta"
+                href="https://100printswith.me"
+                target="_blank"
+                rel="noreferrer"
+              >
+                Open platform
+                <ArrowRightIcon />
+              </a>
+            </nav>
+          </div>
+        </header>
+
+        <main>
+          <section className="hero-section">
+            <div className="hero-copy">
+              <span className="eyebrow">Browser SDK Playground</span>
+
+              <h1>Render templates in your browser.</h1>
+
+              <p>
+                Create images and PDFs with dynamic data using the 100PrintsWithMe Browser SDK.
+              </p>
+
+              <div className="benefit-row">
+                <Benefit text="Works in modern browsers" />
+                <Benefit text="No backend render required" />
+                <Benefit text="PNG, JPEG, PDF & Vector PDF" />
+              </div>
             </div>
-            <p style={{ fontSize: "0.875rem", color: "var(--text-secondary)", marginBottom: "20px" }}>
-              Active Template: <strong style={{ color: "white" }}>{templateInfo.template_data?.name}</strong> (Dimensions: {templateInfo.dimensions?.width}x{templateInfo.dimensions?.height})
-            </p>
 
-            <h3 className="form-label" style={{ marginBottom: "12px", fontSize: "0.75rem", color: "var(--text-secondary)" }}>Mustache Payloads</h3>
-            <div style={{ maxHeight: "220px", overflowY: "auto", paddingRight: "6px", marginBottom: "24px", border: "1px solid var(--panel-border)", borderRadius: "8px", padding: "12px", background: "#030712" }}>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px" }}>
-                {Object.keys(variables).map(vKey => (
-                  <div key={vKey} className="form-group">
-                    <label className="form-label" style={{ fontSize: "0.6875rem", color: "var(--accent-purple)", textTransform: "none" }}>{vKey}</label>
-                    <input
-                      type="text"
-                      value={variables[vKey]}
-                      onChange={e => setVariables({ ...variables, [vKey]: e.target.value })}
-                      className="form-input"
-                    />
-                  </div>
-                ))}
-                {Object.keys(variables).length === 0 && (
-                  <p style={{ color: "var(--text-muted)", fontSize: "0.8125rem", gridColumn: "span 2", textAlign: "center" }}>No mustache variables detected in template layers.</p>
+            <div className="hero-image-wrap">
+              <img
+                src="/showcase.png"
+                alt="Template and data flowing through the 100PrintsWithMe Browser SDK into promotional graphics, certificates, ID cards, reports, and product creatives."
+              />
+            </div>
+          </section>
+
+          <section className="playground-section">
+            <div className="playground-card input-card">
+              <div className="card-head">
+                <div>
+                  <h2>Template & data</h2>
+                  <p>
+                    Provide your publishable API key and the template ID with
+                    the data you want to render.
+                  </p>
+                </div>
+              </div>
+
+              <div className="field">
+                <div className="field-heading">
+                  <label htmlFor="publishable-key">Publishable API key</label>
+                  <a
+                    href="https://100printswith.me"
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    Get your API key <ArrowRightIcon />
+                  </a>
+                </div>
+
+                <input
+                  id="publishable-key"
+                  type="password"
+                  value={publishableKey}
+                  onChange={(event) => setPublishableKey(event.target.value)}
+                  placeholder="pk_live_..."
+                  autoComplete="off"
+                />
+
+                <small>Your publishable key is intended for browser use.</small>
+              </div>
+
+              <div className="field code-field">
+                <div className="field-heading">
+                  <label htmlFor="template-config">Template ID & data</label>
+                  <span>JSON</span>
+                </div>
+
+                <div className="code-editor-shell">
+                  <textarea
+                    id="template-config"
+                    value={code}
+                    onChange={(event) => setCode(event.target.value)}
+                    spellCheck={false}
+                    aria-label="Template ID and data JSON"
+                  />
+                </div>
+              </div>
+
+              <div className="render-actions">
+                <button
+                  className="button primary-button"
+                  type="button"
+                  onClick={renderPreview}
+                  disabled={busy !== null}
+                >
+                  <PlayIcon />
+                  {busy === "preview" ? "Rendering…" : "Render preview"}
+                </button>
+
+                <button
+                  className="button secondary-button"
+                  type="button"
+                  onClick={downloadPng}
+                  disabled={busy !== null}
+                >
+                  <DownloadIcon />
+                  {busy === "png" ? "Preparing…" : "Download PNG"}
+                </button>
+
+                <button
+                  className="button secondary-button"
+                  type="button"
+                  onClick={downloadPdf}
+                  disabled={busy !== null}
+                >
+                  <DownloadIcon />
+                  {busy === "pdf" ? "Preparing…" : "Download PDF"}
+                </button>
+              </div>
+
+              <div className={`render-status ${error ? "is-error" : ""}`}>
+                <span className="status-dot" />
+                <strong>{error || status}</strong>
+                {!error && (
+                  <>
+                    <span className="status-divider" />
+                    <span>Rendering happens locally in your browser.</span>
+                  </>
                 )}
               </div>
             </div>
 
-            <div style={{ borderTop: "1px solid var(--panel-border)", paddingTop: "20px" }}>
-              <h3 className="form-label" style={{ marginBottom: "12px", fontSize: "0.75rem" }}>Render Options</h3>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "12px", marginBottom: "20px" }}>
-                <div className="form-group">
-                  <label className="form-label">Format</label>
-                  <select value={renderFormat} onChange={e => setRenderFormat(e.target.value as any)} className="form-select">
-                    <option value="png">PNG Image</option>
-                    <option value="pdf">PDF Document</option>
-                  </select>
-                </div>
-                <div className="form-group">
-                  <label className="form-label">Quality Scale</label>
-                  <select value={renderQuality} onChange={e => setRenderQuality(e.target.value as any)} className="form-select">
-                    <option value="draft">Draft (1x)</option>
-                    <option value="standard">Standard (2x)</option>
-                    <option value="high">High (4x)</option>
-                    <option value="ultra">Ultra (8x)</option>
-                  </select>
-                </div>
-                <div className="form-group">
-                  <label className="form-label">Side</label>
-                  <select value={renderSide} onChange={e => setRenderSide(e.target.value as any)} className="form-select">
-                    <option value="both">Both (Front & Back)</option>
-                    <option value="front">Front Only</option>
-                    <option value="back">Back Only</option>
-                  </select>
+            <div className="playground-card output-card">
+              <div className="card-head">
+                <div>
+                  <h2>Preview</h2>
+                  <p>
+                    This preview is generated in your browser using a local
+                    object URL.
+                  </p>
                 </div>
               </div>
 
-              <div style={{ display: "flex", gap: "12px" }}>
-                <button onClick={() => updatePreview()} className="btn btn-primary" style={{ flex: 1 }}>
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
-                    <circle cx="12" cy="12" r="3"></circle>
-                  </svg>
-                  Update Preview
-                </button>
-                <button onClick={downloadSingle} className="btn btn-success" style={{ flex: 1 }}>
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-                    <polyline points="7 10 12 15 17 10"></polyline>
-                    <line x1="12" y1="15" x2="12" y2="3"></line>
-                  </svg>
-                  Render Single
-                </button>
+              <div className="preview-stage">
+                {previewUrl ? (
+                  <img
+                    src={previewUrl}
+                    alt="Rendered 100PrintsWithMe template"
+                  />
+                ) : (
+                  <div className="preview-placeholder">
+                    <div className="placeholder-sheet">
+                      <img
+                        src="https://www.100printswith.me/logo-100printswithme.png"
+                        alt=""
+                      />
+                      <span>YOUR TEMPLATE</span>
+                      <strong>Preview</strong>
+                      <p>
+                        Enter your API key and template data, then render.
+                      </p>
+                    </div>
+                  </div>
+                )}
               </div>
-              {previewBlobUrl && (
-                <div style={{ marginTop: "16px", textAlign: "center" }}>
-                  <a href={previewBlobUrl} target="_blank" rel="noreferrer" className="btn-text" style={{ fontSize: "0.8125rem", fontFamily: "var(--font-mono)" }}>
-                    🔗 Open Last Rendered File ({renderFormat.toUpperCase()})
-                  </a>
-                </div>
-              )}
             </div>
-          </div>
-        ) : (
-          <div className="panel" style={{ display: "flex", flexDirection: "column", justifyContent: "center", alignItems: "center", minHeight: "360px", textAlign: "center", color: "var(--text-secondary)" }}>
-            <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" style={{ color: "var(--accent-pink)", marginBottom: "16px" }}>
-              <path d="M12 20h9"></path>
-              <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path>
-            </svg>
-            <h3 style={{ fontSize: "1rem", fontWeight: "600", color: "var(--text-primary)", marginBottom: "8px" }}>2. Customize Template</h3>
-            <p style={{ fontSize: "0.875rem", maxWidth: "260px" }}>Fetch a template definition above to load customization options and variables.</p>
-          </div>
-        )}
+          </section>
 
-        {/* Preview Container */}
-        <div className="panel" style={{ display: "flex", flexDirection: "column" }}>
-          <div className="panel-header">
-            <h2>
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: "var(--accent-blue)" }}>
-                <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
-                <circle cx="8.5" cy="8.5" r="1.5"></circle>
-                <polyline points="21 15 16 10 5 21"></polyline>
-              </svg>
-              Canvas Output Preview
-            </h2>
-          </div>
-          <div className="preview-canvas-container" style={{ position: "relative" }}>
-            <div
-              key="canvas-mount"
-              ref={previewContainerRef}
-              className="canvas-mount-point"
-              style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1, position: "relative" }}
-            />
-            {!templateInfo && (
-              <div key="placeholder" style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", pointerEvents: "none", zIndex: 0 }}>
-                <div style={{ color: "var(--text-secondary)", fontSize: "0.875rem", textAlign: "center", maxWidth: "280px" }}>
-                  Initialize SDK & Fetch Template above to activate preview
+          <section className="use-cases-section">
+            <div className="section-copy">
+              <span className="eyebrow">Use cases</span>
+              <h2>Turn one template into thousands of useful outputs.</h2>
+              <p>
+                Connect application data to a reusable visual template and
+                generate finished graphics or documents directly in the browser.
+              </p>
+            </div>
+
+            <div className="commerce-showcase">
+              <div className="commerce-copy">
+                <span className="showcase-kicker">Commerce & campaigns</span>
+                <h3>Generate promotional graphics from live product data.</h3>
+                <p>
+                  Use one campaign template for sale banners, price drops,
+                  marketplace creatives, recommendation cards, social posts, and
+                  personalized offers. Your app changes the data — the SDK
+                  produces the visual.
+                </p>
+
+                <div className="commerce-code">
+                  <div className="commerce-code-bar">
+                    <span />
+                    <span />
+                    <span />
+                    <small>JavaScript</small>
+                  </div>
+                  <pre>
+                    <code>{`await prints.png({
+  templateId: "tpl_product_offer",
+  data: {
+    product: "Running Shoes",
+    price: "₹2,499",
+    offer: "30% OFF"
+  },
+  side: "front"
+});`}</code>
+                  </pre>
                 </div>
               </div>
-            )}
-          </div>
-        </div>
-      </section>
 
-      {/* NEW INTERACTIVE TABLE BULK EXPORT */}
-      {templateInfo && (
-        <section className="panel">
-          <div className="panel-header">
-            <h2>
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: "var(--accent-green)" }}>
-                <path d="M3 3h18v18H3z"></path>
-                <path d="M21 9H3"></path>
-                <path d="M21 15H3"></path>
-                <path d="M12 3v18"></path>
-              </svg>
-              3. Interactive Bulk Export Grid
-            </h2>
-            <div style={{ display: "flex", alignItems: "center", gap: "16px" }}>
-              <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                <span className="form-label" style={{ fontSize: "0.6875rem", color: "var(--text-secondary)", marginBottom: 0, textTransform: "none" }}>Format:</span>
-                <select
-                  value={renderFormat}
-                  onChange={e => setRenderFormat(e.target.value as any)}
-                  className="form-select"
-                  style={{ padding: "4px 8px", width: "auto", fontSize: "0.75rem", height: "28px", background: "#030712" }}
+              <div className="campaign-results" aria-label="Example generated campaign graphics">
+                <div className="campaign-card campaign-pink">
+                  <span className="campaign-topline">MEGA SALE</span>
+                  <strong>30% OFF</strong>
+                  <div className="campaign-product campaign-product-one" />
+                  <small>SHOP NOW</small>
+                </div>
+
+                <div className="campaign-card campaign-orange">
+                  <span className="campaign-topline">PRICE DROP</span>
+                  <strong>₹2,499</strong>
+                  <div className="campaign-product campaign-product-two" />
+                  <small>VIEW OFFER</small>
+                </div>
+
+                <div className="campaign-card campaign-blue">
+                  <span className="campaign-topline">NEW ARRIVAL</span>
+                  <strong>RUN 02</strong>
+                  <div className="campaign-product campaign-product-three" />
+                  <small>EXPLORE</small>
+                </div>
+
+                <div className="campaign-card campaign-violet">
+                  <span className="campaign-topline">FOR ALEX</span>
+                  <strong>YOUR PICKS</strong>
+                  <div className="campaign-product campaign-product-four" />
+                  <small>SEE PICKS</small>
+                </div>
+              </div>
+            </div>
+
+            <div className="use-case-grid supporting-use-cases">
+              <UseCaseCard
+                icon={<IdIcon />}
+                title="Certificates & IDs"
+                copy="Generate personalized certificates, student cards, employee IDs, badges, membership cards, and passes."
+              />
+
+              <UseCaseCard
+                icon={<DocumentIcon />}
+                title="Reports & business documents"
+                copy="Create reports, invoices, statements, result sheets, and other branded documents from structured data."
+              />
+
+              <UseCaseCard
+                icon={<ImageIcon />}
+                title="Tickets, labels & downloadable assets"
+                copy="Produce tickets, labels, event assets, printable cards, and personalized downloads on demand."
+              />
+            </div>
+          </section>
+
+          <section className="features-showcase">
+            <div className="feature-intro">
+              <span className="eyebrow">Browser SDK</span>
+              <h2>Render directly where your users already are.</h2>
+              <p>
+                Fill a template with your own data and get back a finished
+                visual without building a separate rendering service for every
+                browser workflow. Keep the same template system across images,
+                PDFs, downloads, previews, and app-generated assets.
+              </p>
+            </div>
+
+            <div className="feature-list-wrap">
+              <span className="eyebrow">Key features</span>
+              <h3>Everything needed for browser-side generation.</h3>
+
+              <ul className="feature-list">
+                <li><span><CheckIcon /></span> PNG and JPEG image rendering</li>
+                <li><span><CheckIcon /></span> Raster PDF and vector PDF output</li>
+                <li><span><CheckIcon /></span> Front and back template support</li>
+                <li><span><CheckIcon /></span> Dynamic data and image replacement</li>
+                <li><span><CheckIcon /></span> Platform fonts and custom template fonts</li>
+                <li><span><CheckIcon /></span> Blob URLs and built-in download helpers</li>
+                <li><span><CheckIcon /></span> TypeScript-ready ESM and UMD package</li>
+                <li><span><CheckIcon /></span> Publishable browser key — no secret API key in the client</li>
+              </ul>
+            </div>
+          </section>
+
+          <section className="developer-section">
+            <div className="developer-copy">
+              <span className="eyebrow">For developers</span>
+              <h2>Simple. Powerful. Flexible.</h2>
+              <p>
+                Add the 100PrintsWithMe Browser SDK to your web app with a few
+                lines of code. Render PNG, JPEG, PDF, or vector PDF without
+                building your own rendering pipeline.
+              </p>
+
+              <div className="developer-actions">
+                <a className="button primary-button" href="/docs">
+                  Read the documentation
+                  <ArrowRightIcon />
+                </a>
+
+                <a
+                  className="text-link"
+                  href="https://www.npmjs.com/package/@100printswithme/browser-sdk"
+                  target="_blank"
+                  rel="noreferrer"
                 >
-                  <option value="pdf">PDF (Merged)</option>
-                  <option value="png">ZIP (PNGs)</option>
-                </select>
+                  View on npm
+                  <ArrowRightIcon />
+                </a>
               </div>
-              <button onClick={addTableRow} className="btn btn-secondary" style={{ padding: "6px 12px", fontSize: "0.75rem" }}>
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                  <line x1="12" y1="5" x2="12" y2="19"></line>
-                  <line x1="5" y1="12" x2="19" y2="12"></line>
-                </svg>
-                Add Record Row
-              </button>
+            </div>
+
+            <div className="install-panel">
+              <div className="install-tabs">
+                <div>
+                  {(Object.keys(INSTALL_SNIPPETS) as Array<
+                    keyof typeof INSTALL_SNIPPETS
+                  >).map((tab) => (
+                    <button
+                      key={tab}
+                      type="button"
+                      className={installTab === tab ? "active" : ""}
+                      onClick={() => setInstallTab(tab)}
+                    >
+                      {tab}
+                    </button>
+                  ))}
+                </div>
+
+                <button
+                  type="button"
+                  className="copy-button"
+                  onClick={copyInstall}
+                  aria-label="Copy install command"
+                >
+                  {copied ? "Copied" : <CopyIcon />}
+                </button>
+              </div>
+
+              <pre>
+                <code>{INSTALL_SNIPPETS[installTab]}</code>
+              </pre>
+
+              <div className="mini-code">
+                <span className="mini-line mini-blue">
+                  import {"{ HundredPrints }"} from
+                  "@100printswithme/browser-sdk";
+                </span>
+                <span className="mini-line">
+                  const prints = new HundredPrints(
+                  {"{ publishableKey: 'pk_live_...' }"});
+                </span>
+              </div>
+            </div>
+          </section>
+        </main>
+
+        <footer>
+          <div className="footer-inner">
+            <div className="footer-cta">
+              <div>
+                <span className="footer-cta-label">Start creating</span>
+                <h2>Ready to render in the browser?</h2>
+                <p>Build a template, add your data, and create your next image or PDF.</p>
+              </div>
+              <a href="https://100printswith.me" target="_blank" rel="noreferrer">
+                Open platform <ArrowRightIcon />
+              </a>
+            </div>
+            <div className="footer-top">
+              <div className="footer-brand">
+                <a href="https://100printswith.me" target="_blank" rel="noreferrer">
+                  <img
+                    src="https://www.100printswith.me/logo-100printswithme.png"
+                    alt="100PrintsWithMe"
+                  />
+                </a>
+                <p>Render images and documents from your templates, right in the browser.</p>
+              </div>
+
+              <nav className="footer-links" aria-label="Footer navigation">
+                <div>
+                  <strong>Build</strong>
+                  <a href="/docs">Documentation</a>
+                  <a href="https://www.npmjs.com/package/@100printswithme/browser-sdk" target="_blank" rel="noreferrer">Browser SDK on npm</a>
+                </div>
+                <div>
+                  <strong>100PrintsWithMe</strong>
+                  <a href="https://100printswith.me" target="_blank" rel="noreferrer">Open platform</a>
+                  <a href="https://100printswith.me/feedback" target="_blank" rel="noreferrer">Feedback</a>
+                </div>
+              </nav>
+            </div>
+            <div className="footer-bottom">
+              <span>© {new Date().getFullYear()} 100PrintsWithMe</span>
+              <span>Made for browser-based creation.</span>
             </div>
           </div>
-          <p style={{ color: "var(--text-secondary)", fontSize: "0.875rem", marginBottom: "16px" }}>
-            Add, edit, or delete records in the table grid below. Click Export to download a merged PDF or a ZIP archive containing individual PNGs.
-          </p>
-
-          <div className="table-container">
-            {tableRows.length > 0 ? (
-              <table className="bulk-table">
-                <thead>
-                  <tr>
-                    <th style={{ width: "60px", textAlign: "center" }}>#</th>
-                    {Object.keys(variables).map(vKey => (
-                      <th key={vKey}>{vKey}</th>
-                    ))}
-                    <th style={{ width: "80px", textAlign: "center" }}>Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {tableRows.map((row, rowIndex) => (
-                    <tr key={rowIndex}>
-                      <td style={{ textAlign: "center", color: "var(--text-secondary)", fontSize: "0.75rem", fontFamily: "var(--font-mono)" }}>
-                        {rowIndex + 1}
-                      </td>
-                      {Object.keys(variables).map(vKey => (
-                        <td key={vKey}>
-                          <input
-                            type="text"
-                            value={row[vKey] !== undefined ? row[vKey] : ""}
-                            onChange={e => handleTableCellChange(rowIndex, vKey, e.target.value)}
-                            className="table-input"
-                            placeholder={`Enter ${vKey}...`}
-                          />
-                        </td>
-                      ))}
-                      <td style={{ textAlign: "center" }}>
-                        <button
-                          onClick={() => deleteTableRow(rowIndex)}
-                          className="btn btn-text"
-                          style={{ color: "#ef4444", padding: "4px" }}
-                          title="Delete Row"
-                        >
-                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                            <polyline points="3 6 5 6 21 6"></polyline>
-                            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
-                            <line x1="10" y1="11" x2="10" y2="17"></line>
-                            <line x1="14" y1="11" x2="14" y2="17"></line>
-                          </svg>
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            ) : (
-              <div className="empty-placeholder">
-                No rows in the bulk export table. Click "Add Record Row" to get started.
-              </div>
-            )}
-          </div>
-
-          <div style={{ display: "flex", justifyContent: "flex-end", gap: "12px" }}>
-            <button
-              onClick={triggerTableBulkExport}
-              disabled={tableRows.length === 0}
-              className="btn btn-pink"
-            >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-                <polyline points="7 10 12 15 17 10"></polyline>
-                <line x1="12" y1="15" x2="12" y2="3"></line>
-              </svg>
-              Export Grid Data ({renderFormat.toUpperCase()})
-            </button>
-          </div>
-        </section>
-      )}
-
-      {/* CSV BULK RENDER PANEL */}
-      {/* LOGS PANEL */}
-      <section className="panel">
-        <div className="panel-header">
-          <h2>
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: "var(--text-secondary)" }}>
-              <polyline points="4 17 10 11 4 5"></polyline>
-              <line x1="12" y1="19" x2="20" y2="19"></line>
-            </svg>
-            4. Execution Console Logs
-          </h2>
-          <button onClick={clearLogs} className="btn-text">Clear Console</button>
-        </div>
-
-        <div className="log-console">
-          {logs.length === 0 ? (
-            <div style={{ color: "var(--text-muted)" }}>Console idle. Ready for SDK commands...</div>
-          ) : (
-            logs.map((logStr, i) => {
-              let logClass = "log-entry default";
-              if (logStr.includes("❌")) logClass = "log-entry error";
-              else if (logStr.includes("✅") || logStr.includes("🎉")) logClass = "log-entry success";
-              else if (logStr.includes("🔄") || logStr.includes("📈")) logClass = "log-entry info";
-              return (
-                <div key={i} className={logClass}>
-                  {logStr}
-                </div>
-              );
-            })
-          )}
-        </div>
-      </section>
+        </footer>
+      </div>
     </>
   );
 }
+
+function Benefit({ text }: { text: string }) {
+  return (
+    <div className="benefit">
+      <span>
+        <CheckIcon />
+      </span>
+      {text}
+    </div>
+  );
+}
+
+function UseCaseCard({
+  icon,
+  title,
+  copy,
+}: {
+  icon: React.ReactNode;
+  title: string;
+  copy: string;
+}) {
+  return (
+    <article className="use-case-card">
+      <div className="use-case-icon">{icon}</div>
+      <div>
+        <h3>{title}</h3>
+        <p>{copy}</p>
+      </div>
+    </article>
+  );
+}
+
+function CheckIcon() {
+  return (
+    <svg viewBox="0 0 20 20" aria-hidden="true">
+      <path d="m5.5 10.4 3 3 6-6" />
+    </svg>
+  );
+}
+
+function ArrowRightIcon() {
+  return (
+    <svg viewBox="0 0 20 20" aria-hidden="true">
+      <path d="M4 10h11M11 6l4 4-4 4" />
+    </svg>
+  );
+}
+
+function PlayIcon() {
+  return (
+    <svg viewBox="0 0 20 20" aria-hidden="true">
+      <path d="M7 5.6 14 10l-7 4.4V5.6Z" />
+    </svg>
+  );
+}
+
+function DownloadIcon() {
+  return (
+    <svg viewBox="0 0 20 20" aria-hidden="true">
+      <path d="M10 3v9m0 0 3.5-3.5M10 12 6.5 8.5M4 15.5h12" />
+    </svg>
+  );
+}
+
+function CopyIcon() {
+  return (
+    <svg viewBox="0 0 20 20" aria-hidden="true">
+      <rect x="7" y="6" width="8" height="9" rx="1.5" />
+      <path d="M5 12H4.5A1.5 1.5 0 0 1 3 10.5v-6A1.5 1.5 0 0 1 4.5 3h6A1.5 1.5 0 0 1 12 4.5V5" />
+    </svg>
+  );
+}
+
+function IdIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="3" y="5" width="18" height="14" rx="2" />
+      <circle cx="8.5" cy="11" r="2" />
+      <path d="M5.8 16c.9-1.6 4.5-1.6 5.4 0M14 9h4M14 13h4" />
+    </svg>
+  );
+}
+
+function ImageIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="3" y="4" width="18" height="16" rx="2" />
+      <circle cx="9" cy="9" r="1.5" />
+      <path d="m5 17 4.8-4.8 3.4 3.4 2.3-2.3L19 17" />
+    </svg>
+  );
+}
+
+function DocumentIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M7 3h7l4 4v14H7z" />
+      <path d="M14 3v5h5M10 12h5M10 16h5" />
+    </svg>
+  );
+}
+
+const styles = `
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=DM+Mono:wght@400;500&display=swap');
+
+  :root {
+    font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    color: #101632;
+    background: #f9fbff;
+    font-synthesis: none;
+    text-rendering: optimizeLegibility;
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    margin: 0;
+    min-width: 320px;
+    background:
+      linear-gradient(180deg, #ffffff 0%, #fbfdff 24%, #f7faff 100%);
+    color: #101632;
+  }
+
+  button,
+  input,
+  textarea {
+    font: inherit;
+  }
+
+  button,
+  a {
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  a {
+    color: inherit;
+  }
+
+  svg {
+    width: 1em;
+    height: 1em;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.8;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
+  .page-shell {
+    min-height: 100vh;
+    overflow: hidden;
+  }
+
+  #root {
+    width: 100%;
+    max-width: none;
+    margin: 0;
+    padding: 0;
+    display: block;
+  }
+
+  .page-shell h1 {
+    background: none;
+    -webkit-text-fill-color: currentColor;
+  }
+
+  .page-shell h2 {
+    display: block;
+  }
+
+  .site-header {
+    position: sticky;
+    top: 0;
+    z-index: 50;
+    background: rgba(255, 255, 255, 0.92);
+    border-bottom: 1px solid #e9edf6;
+    backdrop-filter: blur(16px);
+  }
+
+  .header-inner {
+    width: min(1160px, calc(100% - 40px));
+    height: 64px;
+    margin: 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 30px;
+  }
+
+  .brand {
+    display: flex;
+    align-items: center;
+    flex: 0 0 auto;
+  }
+
+  .brand img {
+    width: 188px;
+    max-width: 44vw;
+    display: block;
+  }
+
+  .nav-links {
+    display: flex;
+    align-items: center;
+    gap: 26px;
+  }
+
+  .nav-links a {
+    color: #1d2746;
+    text-decoration: none;
+    font-size: 0.84rem;
+    font-weight: 600;
+    transition: color 140ms ease;
+  }
+
+  .nav-links a:hover {
+    color: #2f62ed;
+  }
+
+  .nav-links .nav-cta {
+    min-height: 40px;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0 16px;
+    border-radius: 8px;
+    background: #2f62ed;
+    color: #ffffff;
+    box-shadow: 0 4px 12px rgba(47, 98, 237, 0.18);
+  }
+
+  .nav-links .nav-cta:hover {
+    background: #2555d8;
+    color: #ffffff;
+  }
+
+  main {
+    width: min(1160px, calc(100% - 40px));
+    margin: 0 auto;
+  }
+
+  .hero-section {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 34px;
+    padding: 48px 0 54px;
+  }
+
+  .hero-copy {
+    width: 100%;
+    max-width: 1100px;
+    text-align: center;
+    position: relative;
+    z-index: 2;
+  }
+
+  .eyebrow {
+    display: inline-block;
+    color: #2f62ed;
+    font-size: 0.72rem;
+    font-weight: 800;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+  }
+
+  .hero-copy h1 {
+    margin: 13px auto 18px;
+    max-width: 100%;
+    color: #0e1530;
+    font-size: clamp(2.25rem, 4.2vw, 3.75rem);
+    line-height: 1.06;
+    letter-spacing: -0.062em;
+    font-weight: 800;
+    white-space: nowrap;
+  }
+
+  .hero-copy > p {
+    max-width: 100%;
+    margin: 0 auto;
+    color: #5f6b86;
+    font-size: clamp(0.85rem, 1.35vw, 1rem);
+    line-height: 1.68;
+    white-space: nowrap;
+  }
+
+  .benefit-row {
+    margin-top: 24px;
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 18px 26px;
+  }
+
+  .benefit {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: #263252;
+    font-size: 0.78rem;
+    font-weight: 600;
+  }
+
+  .benefit > span {
+    width: 22px;
+    height: 22px;
+    display: grid;
+    place-items: center;
+    border-radius: 50%;
+    background: #eef4ff;
+    color: #2f62ed;
+  }
+
+  .benefit svg {
+    width: 14px;
+    height: 14px;
+    stroke-width: 2.2;
+  }
+
+  .hero-image-wrap {
+    width: 100%;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .hero-image-wrap img {
+    width: 100%;
+    max-width: 1160px;
+    height: auto;
+    display: block;
+    object-fit: contain;
+    filter: drop-shadow(0 22px 34px rgba(31, 55, 104, 0.08));
+  }
+
+  .playground-section {
+    display: grid;
+    grid-template-columns: minmax(0, 1.06fr) minmax(390px, 0.94fr);
+    gap: 18px;
+    align-items: stretch;
+  }
+
+  .playground-card {
+    min-width: 0;
+    padding: 23px;
+    background: #ffffff;
+    border: 1px solid #e3e9f4;
+    border-radius: 10px;
+    box-shadow: 0 6px 22px rgba(32, 51, 91, 0.045);
+  }
+
+  .card-head {
+    margin-bottom: 20px;
+  }
+
+  .card-head h2 {
+    margin: 0 0 5px;
+    color: #111936;
+    font-size: 1.12rem;
+    letter-spacing: -0.025em;
+  }
+
+  .card-head p {
+    margin: 0;
+    color: #7b879f;
+    font-size: 0.75rem;
+    line-height: 1.5;
+  }
+
+  .field + .field {
+    margin-top: 18px;
+  }
+
+  .field-heading {
+    min-height: 23px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+  }
+
+  .field-heading label {
+    color: #1c2747;
+    font-size: 0.75rem;
+    font-weight: 700;
+  }
+
+  .field-heading > span {
+    color: #8490a8;
+    font-family: "DM Mono", monospace;
+    font-size: 0.65rem;
+  }
+
+  .field-heading a {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    color: #2f62ed;
+    text-decoration: none;
+    font-size: 0.68rem;
+    font-weight: 600;
+  }
+
+  .field-heading a svg {
+    width: 13px;
+    height: 13px;
+  }
+
+  .field input {
+    width: 100%;
+    height: 42px;
+    padding: 0 13px;
+    border: 1px solid #d6deed;
+    border-radius: 7px;
+    background: #ffffff;
+    color: #15203e;
+    outline: none;
+    transition: border-color 120ms ease, box-shadow 120ms ease;
+  }
+
+  .field input:focus {
+    border-color: #799cf7;
+    box-shadow: 0 0 0 3px rgba(47, 98, 237, 0.08);
+  }
+
+  .field small {
+    display: block;
+    margin-top: 7px;
+    color: #8a95aa;
+    font-size: 0.66rem;
+  }
+
+  .code-editor-shell {
+    margin-top: 5px;
+    overflow: hidden;
+    border-radius: 7px;
+    background: #132131;
+    border: 1px solid #172538;
+  }
+
+  .code-editor-shell textarea {
+    width: 100%;
+    height: 205px;
+    resize: vertical;
+    display: block;
+    padding: 15px 18px;
+    border: 0;
+    outline: 0;
+    background:
+      linear-gradient(90deg, rgba(255,255,255,0.035) 0 36px, transparent 36px),
+      #132131;
+    color: #dce7f5;
+    font-family: "DM Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+    font-size: 0.74rem;
+    line-height: 1.65;
+  }
+
+  .render-actions {
+    display: grid;
+    grid-template-columns: 1.08fr 1fr 1fr;
+    gap: 9px;
+    margin-top: 14px;
+  }
+
+  .button {
+    min-height: 40px;
+    padding: 0 14px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    border-radius: 7px;
+    font-size: 0.74rem;
+    font-weight: 700;
+    text-decoration: none;
+    cursor: pointer;
+    transition: transform 110ms ease, background 110ms ease, border-color 110ms ease;
+  }
+
+  .button svg {
+    width: 15px;
+    height: 15px;
+    stroke-width: 2;
+  }
+
+  .button:active:not(:disabled) {
+    transform: translateY(1px);
+  }
+
+  .button:disabled {
+    opacity: 0.55;
+    cursor: wait;
+  }
+
+  .primary-button {
+    color: #ffffff;
+    background: #2f62ed;
+    border: 1px solid #2f62ed;
+    box-shadow: 0 4px 10px rgba(47, 98, 237, 0.14);
+  }
+
+  .primary-button:hover:not(:disabled) {
+    background: #2555d8;
+    border-color: #2555d8;
+  }
+
+  .secondary-button {
+    color: #263457;
+    background: #ffffff;
+    border: 1px solid #d4ddec;
+  }
+
+  .secondary-button:hover:not(:disabled) {
+    background: #f8faff;
+    border-color: #b8c6de;
+  }
+
+  .render-status {
+    min-height: 35px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 12px;
+    padding-top: 11px;
+    border-top: 1px solid #e7ecf4;
+    color: #9099ac;
+    font-size: 0.64rem;
+  }
+
+  .render-status strong {
+    color: #57627b;
+    font-weight: 600;
+  }
+
+  .status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #36b75c;
+  }
+
+  .status-divider {
+    width: 1px;
+    height: 14px;
+    margin: 0 4px;
+    background: #d6deeb;
+  }
+
+  .render-status.is-error,
+  .render-status.is-error strong {
+    color: #bd3f46;
+  }
+
+  .render-status.is-error .status-dot {
+    background: #df4f58;
+  }
+
+  .output-card {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .preview-stage {
+    width: 100%;
+    aspect-ratio: 1 / 1;
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    padding: 18px;
+    border-radius: 8px;
+    background: #f7f9fd;
+    border: 1px solid #e7ecf4;
+  }
+
+  .preview-stage > img {
+    width: auto;
+    height: auto;
+    max-width: 100%;
+    max-height: 100%;
+    display: block;
+    object-fit: contain;
+    filter: drop-shadow(0 13px 16px rgba(22, 36, 69, 0.12));
+  }
+
+  .preview-placeholder {
+    width: 100%;
+    height: 100%;
+    display: grid;
+    place-items: center;
+  }
+
+  .placeholder-sheet {
+    width: min(78%, 360px);
+    aspect-ratio: 1.35 / 1;
+    display: flex;
+    align-items: center;
+    flex-direction: column;
+    justify-content: center;
+    background: #ffffff;
+    border: 1px solid #e0e5ee;
+    box-shadow: 0 13px 24px rgba(24, 43, 79, 0.10);
+    text-align: center;
+  }
+
+  .placeholder-sheet img {
+    width: 118px;
+    margin-bottom: 24px;
+  }
+
+  .placeholder-sheet span {
+    color: #b2bac9;
+    font-size: 0.55rem;
+    font-weight: 700;
+    letter-spacing: 0.17em;
+  }
+
+  .placeholder-sheet strong {
+    margin-top: 5px;
+    color: #243152;
+    font-family: Georgia, serif;
+    font-size: 1.7rem;
+    font-weight: 500;
+  }
+
+  .placeholder-sheet p {
+    max-width: 210px;
+    margin: 9px 0 0;
+    color: #9aa4b6;
+    font-size: 0.62rem;
+    line-height: 1.5;
+  }
+
+  .use-cases-section {
+    padding: 76px 0 66px;
+  }
+
+  .section-copy {
+    max-width: 720px;
+  }
+
+  .section-copy h2,
+  .developer-copy h2 {
+    margin: 9px 0 7px;
+    color: #101632;
+    font-size: clamp(2rem, 4vw, 3.35rem);
+    line-height: 1.03;
+    letter-spacing: -0.052em;
+  }
+
+  .section-copy > p,
+  .developer-copy > p {
+    max-width: 680px;
+    margin: 0;
+    color: #6f7b94;
+    font-size: 0.9rem;
+    line-height: 1.65;
+  }
+
+  .use-case-grid {
+    margin-top: 28px;
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 16px;
+  }
+
+  .use-case-card {
+    min-height: 136px;
+    padding: 20px;
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 16px;
+    background: #ffffff;
+    border: 1px solid #e4e9f2;
+    border-radius: 8px;
+    box-shadow: 0 5px 18px rgba(28, 48, 88, 0.035);
+  }
+
+  .use-case-icon {
+    width: 48px;
+    height: 48px;
+    display: grid;
+    place-items: center;
+    border-radius: 50%;
+    background: #edf3ff;
+    color: #2f62ed;
+  }
+
+  .use-case-icon svg {
+    width: 26px;
+    height: 26px;
+    stroke-width: 1.7;
+  }
+
+  .use-case-card h3 {
+    margin: 4px 0 7px;
+    color: #18213c;
+    font-size: 0.91rem;
+  }
+
+  .use-case-card p {
+    margin: 0;
+    color: #768199;
+    font-size: 0.74rem;
+    line-height: 1.55;
+  }
+
+  .commerce-showcase {
+    margin-top: 30px;
+    padding: 34px;
+    display: grid;
+    grid-template-columns: minmax(0, 0.9fr) minmax(480px, 1.1fr);
+    gap: 40px;
+    align-items: center;
+    overflow: hidden;
+    background: #ffffff;
+    border: 1px solid #e4e9f2;
+    border-radius: 10px;
+    box-shadow: 0 8px 28px rgba(28, 48, 88, 0.045);
+  }
+
+  .showcase-kicker {
+    color: #2f62ed;
+    font-size: 0.7rem;
+    font-weight: 800;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+  }
+
+  .commerce-copy h3 {
+    max-width: 540px;
+    margin: 9px 0 12px;
+    color: #101632;
+    font-size: clamp(1.8rem, 3.4vw, 3rem);
+    line-height: 1.04;
+    letter-spacing: -0.045em;
+  }
+
+  .commerce-copy > p {
+    max-width: 560px;
+    margin: 0;
+    color: #6f7b94;
+    font-size: 0.86rem;
+    line-height: 1.7;
+  }
+
+  .commerce-code {
+    margin-top: 24px;
+    overflow: hidden;
+    border-radius: 8px;
+    background: #151c2c;
+    box-shadow: 0 14px 26px rgba(20, 29, 49, 0.12);
+  }
+
+  .commerce-code-bar {
+    min-height: 34px;
+    padding: 0 12px;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    background: #202737;
+    border-bottom: 1px solid #2b3448;
+  }
+
+  .commerce-code-bar span {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #ff6961;
+  }
+
+  .commerce-code-bar span:nth-child(2) { background: #f5d76e; }
+  .commerce-code-bar span:nth-child(3) { background: #54d98c; }
+
+  .commerce-code-bar small {
+    margin-left: auto;
+    color: #8892a7;
+    font-size: 0.62rem;
+  }
+
+  .commerce-code pre {
+    margin: 0;
+    padding: 17px 18px 19px;
+    overflow-x: auto;
+    color: #dbe7f5;
+    font: 0.69rem/1.65 "DM Mono", ui-monospace, monospace;
+  }
+
+  .campaign-results {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 12px;
+    align-items: end;
+    position: relative;
+  }
+
+  .campaign-results::before {
+    content: "";
+    position: absolute;
+    width: 88%;
+    height: 70%;
+    left: 6%;
+    bottom: -8%;
+    background: radial-gradient(circle, rgba(47,98,237,0.14), transparent 68%);
+    filter: blur(22px);
+    z-index: 0;
+  }
+
+  .campaign-card {
+    min-width: 0;
+    aspect-ratio: 0.76 / 1;
+    padding: 13px 11px 11px;
+    display: flex;
+    flex-direction: column;
+    position: relative;
+    z-index: 1;
+    overflow: hidden;
+    border-radius: 8px;
+    box-shadow: 0 16px 27px rgba(35, 50, 88, 0.13);
+  }
+
+  .campaign-card:nth-child(1) { transform: rotate(-3deg) translateY(13px); }
+  .campaign-card:nth-child(2) { transform: rotate(1deg); }
+  .campaign-card:nth-child(3) { transform: rotate(-1deg) translateY(7px); }
+  .campaign-card:nth-child(4) { transform: rotate(3deg) translateY(18px); }
+
+  .campaign-topline {
+    color: #ffffff;
+    font-size: clamp(0.55rem, 1vw, 0.75rem);
+    font-weight: 800;
+    letter-spacing: 0.04em;
+  }
+
+  .campaign-card strong {
+    margin-top: 2px;
+    color: #ffffff;
+    font-size: clamp(0.88rem, 1.4vw, 1.25rem);
+    line-height: 1;
+  }
+
+  .campaign-card small {
+    margin-top: auto;
+    align-self: flex-start;
+    padding: 5px 7px;
+    border-radius: 4px;
+    background: #ffffff;
+    color: #17213f;
+    font-size: 0.48rem;
+    font-weight: 800;
+  }
+
+  .campaign-pink {
+    background: linear-gradient(150deg, #ff2cb3 0 50%, #ff813b 50% 100%);
+  }
+
+  .campaign-orange {
+    background: linear-gradient(155deg, #ff8a28 0 47%, #ffca2c 47% 100%);
+  }
+
+  .campaign-blue {
+    background: linear-gradient(155deg, #3266ed 0 52%, #6e5cf2 52% 100%);
+  }
+
+  .campaign-violet {
+    background: linear-gradient(155deg, #7655ee 0 46%, #e349b6 46% 100%);
+  }
+
+  .campaign-product {
+    width: 72%;
+    aspect-ratio: 1 / 1;
+    margin: auto;
+    border-radius: 50%;
+    position: relative;
+    background: rgba(255,255,255,0.94);
+    box-shadow: inset 0 0 0 5px rgba(255,255,255,0.24);
+  }
+
+  .campaign-product::before,
+  .campaign-product::after {
+    content: "";
+    position: absolute;
+    border-radius: 999px;
+  }
+
+  .campaign-product-one::before {
+    width: 62%;
+    height: 30%;
+    left: 20%;
+    top: 39%;
+    background: #111a35;
+    transform: rotate(-18deg);
+  }
+
+  .campaign-product-one::after {
+    width: 44%;
+    height: 13%;
+    left: 32%;
+    top: 33%;
+    background: #ffffff;
+    border: 4px solid #111a35;
+  }
+
+  .campaign-product-two::before {
+    width: 62%;
+    height: 62%;
+    left: 19%;
+    top: 18%;
+    background: linear-gradient(135deg, #ffffff 0 48%, #ef5c37 48%);
+    border-radius: 18px;
+    transform: rotate(10deg);
+  }
+
+  .campaign-product-two::after {
+    width: 26%;
+    height: 26%;
+    right: 12%;
+    top: 8%;
+    background: #2f62ed;
+  }
+
+  .campaign-product-three::before {
+    width: 67%;
+    height: 28%;
+    left: 18%;
+    top: 39%;
+    background: #eef2f8;
+    border: 4px solid #d7dfec;
+    transform: rotate(-18deg);
+  }
+
+  .campaign-product-three::after {
+    width: 36%;
+    height: 14%;
+    left: 31%;
+    top: 48%;
+    background: #80a2e9;
+    transform: rotate(-18deg);
+  }
+
+  .campaign-product-four::before {
+    width: 30%;
+    height: 54%;
+    left: 35%;
+    top: 23%;
+    background: #101632;
+    border-radius: 12px;
+  }
+
+  .campaign-product-four::after {
+    width: 18%;
+    height: 18%;
+    left: 41%;
+    top: 17%;
+    background: #f1c27d;
+    border-radius: 50%;
+  }
+
+  .supporting-use-cases {
+    margin-top: 18px;
+  }
+
+  .features-showcase {
+    margin: 10px 0 74px;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    border-top: 1px solid #dfe5ef;
+    border-bottom: 1px solid #dfe5ef;
+    background: #ffffff;
+  }
+
+  .feature-intro,
+  .feature-list-wrap {
+    padding: 58px 52px;
+  }
+
+  .feature-intro {
+    border-right: 1px solid #dfe5ef;
+  }
+
+  .feature-intro h2,
+  .feature-list-wrap h3 {
+    margin: 10px 0 18px;
+    color: #101632;
+    letter-spacing: -0.045em;
+  }
+
+  .feature-intro h2 {
+    max-width: 540px;
+    font-size: clamp(2.1rem, 4.2vw, 3.8rem);
+    line-height: 1.03;
+  }
+
+  .feature-intro p {
+    max-width: 570px;
+    margin: 0;
+    color: #56627b;
+    font-size: clamp(1rem, 1.7vw, 1.2rem);
+    line-height: 1.75;
+  }
+
+  .feature-list-wrap h3 {
+    font-size: clamp(1.85rem, 3vw, 2.8rem);
+    line-height: 1.05;
+  }
+
+  .feature-list {
+    margin: 25px 0 0;
+    padding: 0;
+    list-style: none;
+    display: grid;
+    gap: 14px;
+  }
+
+  .feature-list li {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    color: #202943;
+    font-size: 0.96rem;
+    line-height: 1.45;
+  }
+
+  .feature-list li > span {
+    width: 22px;
+    height: 22px;
+    flex: 0 0 22px;
+    display: grid;
+    place-items: center;
+    margin-top: 1px;
+    color: #159447;
+  }
+
+  .feature-list svg {
+    width: 18px;
+    height: 18px;
+    stroke-width: 2.4;
+  }
+
+  .developer-section {
+    margin-bottom: 70px;
+    padding: 30px;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(400px, 0.96fr);
+    gap: 46px;
+    align-items: center;
+    background: linear-gradient(135deg, #f2f6ff 0%, #f8faff 100%);
+    border: 1px solid #e4eaf5;
+    border-radius: 10px;
+  }
+
+  .developer-copy h2 {
+    font-size: clamp(1.85rem, 3.5vw, 2.8rem);
+  }
+
+  .developer-copy > p {
+    max-width: 560px;
+    font-size: 0.8rem;
+  }
+
+  .developer-actions {
+    display: flex;
+    align-items: center;
+    gap: 18px;
+    margin-top: 20px;
+  }
+
+  .developer-actions .primary-button {
+    min-height: 42px;
+  }
+
+  .text-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: #33415f;
+    text-decoration: none;
+    font-size: 0.74rem;
+    font-weight: 700;
+  }
+
+  .text-link:hover {
+    color: #2f62ed;
+  }
+
+  .install-panel {
+    overflow: hidden;
+    background: #132131;
+    border: 1px solid #24374b;
+    border-radius: 8px;
+    box-shadow: 0 13px 30px rgba(23, 37, 65, 0.09);
+  }
+
+  .install-tabs {
+    min-height: 40px;
+    padding: 0 10px 0 13px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: #ffffff;
+    border-bottom: 1px solid #e3e8f0;
+  }
+
+  .install-tabs > div {
+    display: flex;
+    height: 40px;
+  }
+
+  .install-tabs button {
+    border: 0;
+    background: transparent;
+    cursor: pointer;
+  }
+
+  .install-tabs > div button {
+    position: relative;
+    padding: 0 14px;
+    color: #7a8498;
+    font-size: 0.7rem;
+    font-weight: 600;
+  }
+
+  .install-tabs > div button.active {
+    color: #2f62ed;
+  }
+
+  .install-tabs > div button.active::after {
+    content: "";
+    position: absolute;
+    left: 14px;
+    right: 14px;
+    bottom: 0;
+    height: 2px;
+    background: #2f62ed;
+  }
+
+  .copy-button {
+    min-width: 48px;
+    display: grid;
+    place-items: center;
+    color: #768196;
+    font-size: 0.65rem;
+  }
+
+  .copy-button svg {
+    width: 16px;
+    height: 16px;
+  }
+
+  .install-panel pre {
+    margin: 0;
+    padding: 22px 20px 17px;
+    color: #f2f6fb;
+    overflow-x: auto;
+    font-family: "DM Mono", ui-monospace, monospace;
+    font-size: 0.72rem;
+  }
+
+  .install-panel pre code::before {
+    content: "$ ";
+    color: #efc56c;
+  }
+
+  .mini-code {
+    padding: 0 20px 19px;
+    display: grid;
+    gap: 6px;
+    font-family: "DM Mono", ui-monospace, monospace;
+    font-size: 0.57rem;
+  }
+
+  .mini-line {
+    color: #84c5a0;
+  }
+
+  .mini-blue {
+    color: #85b4ff;
+  }
+
+  footer {
+    border-top: 1px solid #e4eaf4;
+    background: #f6f8fc;
+  }
+
+  .footer-inner {
+    width: min(1160px, calc(100% - 40px));
+    margin: 0 auto;
+    color: #78839a;
+    font-size: 0.76rem;
+  }
+
+  .footer-cta {
+    margin-top: 42px;
+    padding: 32px 38px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 32px;
+    border-radius: 16px;
+    background: linear-gradient(115deg, #152655 0%, #2459c4 100%);
+    box-shadow: 0 18px 36px rgba(25, 60, 132, 0.14);
+  }
+
+  .footer-cta-label {
+    color: #a9c5ff;
+    font-size: 0.67rem;
+    font-weight: 800;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+  }
+
+  .footer-cta h2 {
+    margin: 8px 0 7px;
+    color: #ffffff;
+    font-size: clamp(1.35rem, 2.4vw, 2rem);
+    letter-spacing: -0.04em;
+    line-height: 1.15;
+  }
+
+  .footer-cta p {
+    color: #d2dfff;
+    font-size: 0.85rem;
+    line-height: 1.5;
+  }
+
+  .footer-cta > a {
+    min-height: 44px;
+    padding: 0 18px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 9px;
+    flex: 0 0 auto;
+    border-radius: 8px;
+    background: #ffffff;
+    color: #1b45a3;
+    font-size: 0.8rem;
+    font-weight: 700;
+    text-decoration: none;
+    transition: background 140ms ease, transform 140ms ease;
+  }
+
+  .footer-cta > a:hover {
+    background: #eaf1ff;
+    transform: translateY(-2px);
+  }
+
+  .footer-top {
+    padding: 48px 0 42px;
+    display: flex;
+    align-items: start;
+    justify-content: space-between;
+    gap: 56px;
+  }
+
+  .footer-brand {
+    max-width: 330px;
+  }
+
+  .footer-brand img {
+    width: 188px;
+    max-width: 100%;
+    display: block;
+  }
+
+  .footer-brand p {
+    margin: 16px 0 0;
+    color: #66738e;
+    font-size: 0.83rem;
+    line-height: 1.65;
+  }
+
+  .footer-links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 50px;
+  }
+
+  .footer-links div {
+    min-width: 145px;
+    display: grid;
+    align-content: start;
+    gap: 13px;
+  }
+
+  .footer-links strong {
+    color: #1d2746;
+    font-size: 0.79rem;
+  }
+
+  .footer-links a {
+    color: #66738e;
+    font-size: 0.79rem;
+    text-decoration: none;
+    transition: color 140ms ease;
+  }
+
+  .footer-links a:hover {
+    color: #2f62ed;
+  }
+
+  .footer-bottom {
+    min-height: 58px;
+    border-top: 1px solid #dfe6f1;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 20px;
+  }
+
+  @media (max-width: 1120px) {
+    .commerce-showcase {
+      grid-template-columns: 1fr;
+    }
+
+    .campaign-results {
+      max-width: 760px;
+      width: 100%;
+      margin: 0 auto;
+    }
+  }
+
+  @media (max-width: 1000px) {
+    .hero-section {
+      padding-top: 44px;
+    }
+
+    .playground-section {
+      grid-template-columns: 1fr;
+    }
+
+    .output-card {
+      min-height: 620px;
+    }
+
+    .preview-stage {
+      max-height: 560px;
+    }
+
+    .developer-section {
+      grid-template-columns: 1fr;
+    }
+  }
+
+  @media (max-width: 760px) {
+    .header-inner,
+    main,
+    .footer-inner {
+      width: min(100% - 24px, 1160px);
+    }
+
+    .header-inner {
+      height: auto;
+      min-height: 66px;
+    }
+
+    .brand img {
+      width: 156px;
+    }
+
+    .nav-links {
+      gap: 13px;
+    }
+
+    .nav-links a {
+      font-size: 0.73rem;
+    }
+
+    .nav-links .nav-cta {
+      display: none;
+    }
+
+    .hero-section {
+      padding-top: 38px;
+    }
+
+    .hero-copy h1 {
+      font-size: clamp(2.25rem, 8vw, 3.5rem);
+      white-space: normal;
+    }
+
+    .hero-copy > p {
+      white-space: normal;
+    }
+
+    .render-actions {
+      grid-template-columns: 1fr;
+    }
+
+    .render-status {
+      flex-wrap: wrap;
+    }
+
+    .status-divider {
+      display: none;
+    }
+
+    .use-case-grid {
+      grid-template-columns: 1fr;
+    }
+
+    .commerce-showcase {
+      padding: 22px;
+      gap: 28px;
+    }
+
+    .campaign-results {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .campaign-card:nth-child(n) {
+      transform: none;
+    }
+
+    .features-showcase {
+      grid-template-columns: 1fr;
+      margin-bottom: 58px;
+    }
+
+    .feature-intro,
+    .feature-list-wrap {
+      padding: 38px 24px;
+    }
+
+    .feature-intro {
+      border-right: 0;
+      border-bottom: 1px solid #dfe5ef;
+    }
+
+    .use-case-card {
+      min-height: 0;
+    }
+
+    .developer-section {
+      padding: 22px;
+      gap: 28px;
+    }
+
+    .footer-inner {
+      padding: 0;
+    }
+
+    .footer-cta {
+      margin-top: 28px;
+      padding: 28px;
+      flex-direction: column;
+      align-items: flex-start;
+    }
+
+    .footer-top {
+      flex-direction: column;
+      gap: 30px;
+      padding: 36px 0;
+    }
+
+    .footer-bottom {
+      flex-wrap: wrap;
+      padding: 18px 0;
+    }
+  }
+
+  @media (max-width: 520px) {
+    .nav-links {
+      gap: 10px;
+    }
+
+    .nav-links a:nth-child(3) {
+      display: none;
+    }
+
+    .hero-section {
+      gap: 22px;
+      padding: 32px 0 38px;
+    }
+
+    .benefit-row {
+      align-items: center;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .footer-links {
+      gap: 32px;
+    }
+
+    .footer-cta {
+      padding: 24px;
+    }
+
+    .footer-cta > a {
+      width: 100%;
+    }
+
+    .footer-links div {
+      min-width: 120px;
+    }
+
+    .footer-bottom {
+      align-items: flex-start;
+      flex-direction: column;
+      gap: 7px;
+    }
+
+    .playground-card {
+      padding: 17px;
+    }
+
+    .field-heading {
+      align-items: flex-start;
+      flex-direction: column;
+      gap: 3px;
+    }
+
+    .output-card {
+      min-height: 460px;
+    }
+
+    .preview-stage {
+      padding: 10px;
+    }
+
+    .developer-actions {
+      align-items: flex-start;
+      flex-direction: column;
+    }
+  }
+`;
