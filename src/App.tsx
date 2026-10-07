@@ -206,7 +206,8 @@ export default function App() {
             </a>
 
             <nav className="nav-links" aria-label="Main navigation">
-              <a href="/docs">Docs</a>
+              <a href="https://100printswith.me/docs" target="_blank"
+                rel="noreferrer">Docs</a>
               <a
                 href="https://100printswith.me"
                 target="_blank"
@@ -527,7 +528,8 @@ export default function App() {
               </p>
 
               <div className="developer-actions">
-                <a className="button primary-button" href="/docs">
+                <a className="button primary-button" href="https://100printswith.me/docs" target="_blank"
+                  rel="noreferrer">
                   Read the documentation
                   <ArrowRightIcon />
                 </a>
@@ -615,7 +617,8 @@ export default function App() {
               <nav className="footer-links" aria-label="Footer navigation">
                 <div>
                   <strong>Build</strong>
-                  <a href="/docs">Documentation</a>
+                  <a href="https://100printswith.me/docs" target="_blank"
+                    rel="noreferrer">Documentation</a>
                   <a href="https://www.npmjs.com/package/@100printswithme/browser-sdk" target="_blank" rel="noreferrer">Browser SDK on npm</a>
                 </div>
                 <div>
